@@ -1,50 +1,284 @@
 #include "kernels.h"
+#include <algorithm>
+#include <cmath>
 
-// GPU kernel
+// ==========================
+// 🧠 HELPER (CPU BORDER COPY)
+// ==========================
+void copy_borders(unsigned char *input, unsigned char *output, int w, int h)
+{
+    std::copy(input, input + (w * h * 3), output);
+}
+
+// ==========================
+// 🔹 GPU: GRAYSCALE
+// ==========================
 __global__ void grayscale_kernel(
-    unsigned char* input,
-    unsigned char* output,
-    int width,
-    int height
-) {
+    unsigned char *input,
+    unsigned char *output,
+    int w,
+    int h)
+{
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (x < width && y < height) {
-        int idx = (y * width + x) * 3;
+    if (x < w && y < h)
+    {
+        int idx = (y * w + x) * 3;
 
         unsigned char r = input[idx];
         unsigned char g = input[idx + 1];
         unsigned char b = input[idx + 2];
 
-        unsigned char gray = 0.299f*r + 0.587f*g + 0.114f*b;
+        unsigned char gray = 0.299f * r + 0.587f * g + 0.114f * b;
 
-        output[idx]     = gray;
-        output[idx + 1] = gray;
-        output[idx + 2] = gray;
+        output[idx] = output[idx + 1] = output[idx + 2] = gray;
     }
 }
 
-// CPU version
-void grayscale_cpu(
-    unsigned char* input,
-    unsigned char* output,
-    int width,
-    int height
-) {
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int idx = (y * width + x) * 3;
+// ==========================
+// 🔹 CPU: GRAYSCALE
+// ==========================
+void grayscale_cpu(unsigned char *input, unsigned char *output, int w, int h)
+{
+    for (int y = 0; y < h; y++)
+    {
+        for (int x = 0; x < w; x++)
+        {
+            int idx = (y * w + x) * 3;
 
             unsigned char r = input[idx];
             unsigned char g = input[idx + 1];
             unsigned char b = input[idx + 2];
 
-            unsigned char gray = 0.299f*r + 0.587f*g + 0.114f*b;
+            unsigned char gray = 0.299f * r + 0.587f * g + 0.114f * b;
 
-            output[idx]     = gray;
-            output[idx + 1] = gray;
-            output[idx + 2] = gray;
+            output[idx] = output[idx + 1] = output[idx + 2] = gray;
         }
+    }
+}
+
+// ==========================
+// 🔹 GPU: BLUR (3x3)
+// ==========================
+__global__ void blur_kernel(unsigned char *input, unsigned char *output, int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= 1 && x < w - 1 && y >= 1 && y < h - 1)
+    {
+        int sum = 0;
+
+        for (int ky = -1; ky <= 1; ky++)
+        {
+            for (int kx = -1; kx <= 1; kx++)
+            {
+                int idx = ((y + ky) * w + (x + kx)) * 3;
+                sum += input[idx];
+            }
+        }
+
+        unsigned char val = sum / 9;
+
+        int out_idx = (y * w + x) * 3;
+        output[out_idx] = output[out_idx + 1] = output[out_idx + 2] = val;
+    }
+}
+
+// ==========================
+// 🔹 CPU: BLUR
+// ==========================
+void blur_cpu(unsigned char *input, unsigned char *output, int w, int h)
+{
+    copy_borders(input, output, w, h);
+
+    for (int y = 1; y < h - 1; y++)
+    {
+        for (int x = 1; x < w - 1; x++)
+        {
+
+            int sum = 0;
+            for (int ky = -1; ky <= 1; ky++)
+                for (int kx = -1; kx <= 1; kx++)
+                    sum += input[((y + ky) * w + (x + kx)) * 3];
+
+            int idx = (y * w + x) * 3;
+            unsigned char val = sum / 9;
+
+            output[idx] = output[idx + 1] = output[idx + 2] = val;
+        }
+    }
+}
+
+// ==========================
+// 🔥 GPU: SOBEL (SHARED MEMORY)
+// ==========================
+#define BLOCK 16
+
+__global__ void sobel_shared_kernel(unsigned char *input, unsigned char *output, int w, int h, int threshold)
+{
+    __shared__ unsigned char tile[BLOCK + 2][BLOCK + 2];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int x = blockIdx.x * BLOCK + tx;
+    int y = blockIdx.y * BLOCK + ty;
+
+    if (x < w && y < h)
+    {
+        tile[ty + 1][tx + 1] = input[(y * w + x) * 3];
+    }
+
+    if (tx == 0 && x > 0)
+        tile[ty + 1][0] = input[(y * w + (x - 1)) * 3];
+    if (tx == BLOCK - 1 && x < w - 1)
+        tile[ty + 1][BLOCK + 1] = input[(y * w + (x + 1)) * 3];
+
+    if (ty == 0 && y > 0)
+        tile[0][tx + 1] = input[((y - 1) * w + x) * 3];
+    if (ty == BLOCK - 1 && y < h - 1)
+        tile[BLOCK + 1][tx + 1] = input[((y + 1) * w + x) * 3];
+
+    __syncthreads();
+
+    if (x > 0 && x < w - 1 && y > 0 && y < h - 1)
+    {
+
+        int gx =
+            -tile[ty][tx] + tile[ty][tx + 2] - 2 * tile[ty + 1][tx] + 2 * tile[ty + 1][tx + 2] - tile[ty + 2][tx] + tile[ty + 2][tx + 2];
+
+        int gy =
+            -tile[ty][tx] - 2 * tile[ty][tx + 1] - tile[ty][tx + 2] + tile[ty + 2][tx] + 2 * tile[ty + 2][tx + 1] + tile[ty + 2][tx + 2];
+
+        float mag_f = sqrtf((float)(gx * gx + gy * gy));
+        int mag = min(255, (int)mag_f);
+
+        if (threshold > 0)
+        {
+            mag = (mag > threshold) ? 255 : 0;
+        }
+
+        int idx = (y * w + x) * 3;
+        output[idx] = output[idx + 1] = output[idx + 2] = mag;
+    }
+}
+
+// ==========================
+// 🔹 CPU: SOBEL
+// ==========================
+void sobel_cpu(unsigned char *input, unsigned char *output, int w, int h)
+{
+    copy_borders(input, output, w, h);
+
+    for (int y = 1; y < h - 1; y++)
+    {
+        for (int x = 1; x < w - 1; x++)
+        {
+
+            int gx =
+                -input[((y - 1) * w + (x - 1)) * 3] + input[((y - 1) * w + (x + 1)) * 3] - 2 * input[(y * w + (x - 1)) * 3] + 2 * input[(y * w + (x + 1)) * 3] - input[((y + 1) * w + (x - 1)) * 3] + input[((y + 1) * w + (x + 1)) * 3];
+
+            int gy =
+                -input[((y - 1) * w + (x - 1)) * 3] - 2 * input[((y - 1) * w + x) * 3] - input[((y - 1) * w + (x + 1)) * 3] + input[((y + 1) * w + (x - 1)) * 3] + 2 * input[((y + 1) * w + x) * 3] + input[((y + 1) * w + (x + 1)) * 3];
+
+            int mag = std::min(255, std::abs(gx) + std::abs(gy));
+
+            int idx = (y * w + x) * 3;
+            output[idx] = output[idx + 1] = output[idx + 2] = mag;
+        }
+    }
+}
+
+// ==========================
+// 🔹 GPU: SHARPEN
+// ==========================
+__global__ void sharpen_kernel(unsigned char *input, unsigned char *output, int w, int h)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x > 0 && x < w - 1 && y > 0 && y < h - 1)
+    {
+        int idx = (y * w + x) * 3;
+
+        int val = 5 * input[idx] - input[((y - 1) * w + x) * 3] - input[((y + 1) * w + x) * 3] - input[(y * w + (x - 1)) * 3] - input[(y * w + (x + 1)) * 3];
+
+        val = min(255, max(0, val));
+
+        output[idx] = output[idx + 1] = output[idx + 2] = val;
+    }
+}
+
+// ==========================
+// 🔹 CPU: SHARPEN
+// ==========================
+void sharpen_cpu(unsigned char *input, unsigned char *output, int w, int h)
+{
+    copy_borders(input, output, w, h);
+
+    for (int y = 1; y < h - 1; y++)
+    {
+        for (int x = 1; x < w - 1; x++)
+        {
+
+            int idx = (y * w + x) * 3;
+
+            int val =
+                5 * input[idx] - input[((y - 1) * w + x) * 3] - input[((y + 1) * w + x) * 3] - input[(y * w + (x - 1)) * 3] - input[(y * w + (x + 1)) * 3];
+
+            val = std::min(255, std::max(0, val));
+
+            output[idx] = output[idx + 1] = output[idx + 2] = val;
+        }
+    }
+}
+
+#define BLOCK 16
+
+__global__ void blur_shared_kernel(
+    unsigned char* input,
+    unsigned char* output,
+    int w,
+    int h
+) {
+    __shared__ unsigned char tile[BLOCK+2][BLOCK+2];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int x = blockIdx.x * BLOCK + tx;
+    int y = blockIdx.y * BLOCK + ty;
+
+    // Load center pixel
+    if (x < w && y < h)
+        tile[ty+1][tx+1] = input[(y*w + x)*3];
+
+    // Load halo (left/right)
+    if (tx == 0 && x > 0)
+        tile[ty+1][0] = input[(y*w + (x-1))*3];
+    if (tx == BLOCK-1 && x < w-1)
+        tile[ty+1][BLOCK+1] = input[(y*w + (x+1))*3];
+
+    // Load halo (top/bottom)
+    if (ty == 0 && y > 0)
+        tile[0][tx+1] = input[((y-1)*w + x)*3];
+    if (ty == BLOCK-1 && y < h-1)
+        tile[BLOCK+1][tx+1] = input[((y+1)*w + x)*3];
+
+    __syncthreads();
+
+    if (x >= 1 && x < w-1 && y >= 1 && y < h-1) {
+        int sum = 0;
+
+        for (int ky = -1; ky <= 1; ky++)
+            for (int kx = -1; kx <= 1; kx++)
+                sum += tile[ty+1+ky][tx+1+kx];
+
+        int idx = (y*w + x)*3;
+        unsigned char val = sum / 9;
+
+        output[idx] = output[idx+1] = output[idx+2] = val;
     }
 }

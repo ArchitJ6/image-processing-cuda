@@ -1,97 +1,173 @@
 #include <iostream>
 #include <chrono>
+#include <string>
+#include <vector>
+#include <cstring>
+
 #include "kernels.h"
 #include "image_io.h"
 
-int main() {
-    try{
-    std::cout << "Program started\n";
+// ==========================
+// 🔧 CLI PARSER
+// ==========================
+struct Config
+{
+    std::string filter = "grayscale";
+    std::string input = "data/input.ppm";
+    std::string output_prefix = "output/output";
+    int threshold = 0;
+};
 
-    std::cout << "Loading image...\n";
+Config parse_args(int argc, char **argv)
+{
+    Config cfg;
 
-    Image img = loadPPM("data/input.ppm");
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc)
+            cfg.filter = argv[++i];
+        else if (strcmp(argv[i], "--input") == 0 && i + 1 < argc)
+            cfg.input = argv[++i];
+        else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc)
+            cfg.output_prefix = argv[++i];
+        else if (strcmp(argv[i], "--threshold") == 0 && i + 1 < argc)
+            cfg.threshold = atoi(argv[++i]);
+    }
 
-    std::cout << "Loaded image: "
-          << img.width << " x " << img.height << "\n";
+    return cfg;
+}
 
-    int size = img.width * img.height * 3;
+// ==========================
+// 🚀 MAIN
+// ==========================
+int main(int argc, char **argv)
+{
+    try
+    {
+        Config cfg = parse_args(argc, argv);
 
-    unsigned char *d_input, *d_output;
+        std::cout << "=== CUDA Image Processing ===\n";
+        std::cout << "Filter: " << cfg.filter << "\n";
 
-    cudaMalloc(&d_input, size);
-    cudaMalloc(&d_output, size);
+        // Load image
+        Image img = loadPPM(cfg.input);
+        std::cout << "Loaded: " << img.width << " x " << img.height << "\n";
 
-    // CPU buffers
-    std::vector<unsigned char> cpu_output(size);
+        int size = img.width * img.height * 3;
 
-    cudaMemcpy(d_input, img.data.data(), size, cudaMemcpyHostToDevice);
+        unsigned char *d_input, *d_output;
+        cudaMalloc(&d_input, size);
+        cudaMalloc(&d_output, size);
 
-    dim3 threads(16, 16);
-    dim3 blocks(
-        (img.width + 15) / 16,
-        (img.height + 15) / 16
-    );
+        cudaMemcpy(d_input, img.data.data(), size, cudaMemcpyHostToDevice);
 
-    // =========================
-    // 🚀 GPU TIMING (CUDA EVENTS)
-    // =========================
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+        std::vector<unsigned char> cpu_output(size);
 
-    cudaEventRecord(start);
+        dim3 threads(16, 16);
+        dim3 blocks((img.width + 15) / 16, (img.height + 15) / 16);
 
-    grayscale_kernel<<<blocks, threads>>>(
-        d_input, d_output,
-        img.width, img.height
-    );
+        // =========================
+        // 🚀 GPU EXECUTION
+        // =========================
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
+        cudaEventRecord(start);
 
-    float gpu_ms = 0;
-    cudaEventElapsedTime(&gpu_ms, start, stop);
+        if (cfg.filter == "grayscale")
+        {
+            grayscale_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+        }
+        else if (cfg.filter == "blur")
+        {
+            blur_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+        }
+        else if (cfg.filter == "sobel")
+        {
+            sobel_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height, cfg.threshold);
+        }
+        else if (cfg.filter == "sharpen")
+        {
+            sharpen_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+        }
+        else
+        {
+            throw std::runtime_error("Unknown filter");
+        }
 
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+        cudaDeviceSynchronize();
 
-    cudaMemcpy(img.data.data(), d_output, size, cudaMemcpyDeviceToHost);
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
 
-    savePPM("output/output_gpu.ppm", img);
+        float gpu_ms = 0;
+        cudaEventElapsedTime(&gpu_ms, start, stop);
 
-    // =========================
-    // 🧠 CPU TIMING
-    // =========================
-    auto cpu_start = std::chrono::high_resolution_clock::now();
+        cudaMemcpy(img.data.data(), d_output, size, cudaMemcpyDeviceToHost);
 
-    grayscale_cpu(
-        img.data.data(),
-        cpu_output.data(),
-        img.width,
-        img.height
-    );
+        std::string gpu_out = cfg.output_prefix + "_gpu_" + cfg.filter + ".ppm";
+        savePPM(gpu_out, img);
 
-    auto cpu_end = std::chrono::high_resolution_clock::now();
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
 
-    double cpu_ms = std::chrono::duration<double, std::milli>(cpu_end - cpu_start).count();
+        // =========================
+        // 🧠 CPU EXECUTION
+        // =========================
+        auto cpu_start = std::chrono::high_resolution_clock::now();
 
-    // Save CPU output
-    Image cpu_img = img;
-    cpu_img.data = cpu_output;
-    savePPM("output/output_cpu.ppm", cpu_img);
+        if (cfg.filter == "grayscale")
+        {
+            grayscale_cpu(img.data.data(), cpu_output.data(), img.width, img.height);
+        }
+        else if (cfg.filter == "blur")
+        {
+            blur_cpu(img.data.data(), cpu_output.data(), img.width, img.height);
+        }
+        else if (cfg.filter == "sobel")
+        {
+            sobel_cpu(img.data.data(), cpu_output.data(), img.width, img.height);
+        }
+        else if (cfg.filter == "sharpen")
+        {
+            sharpen_cpu(img.data.data(), cpu_output.data(), img.width, img.height);
+        }
 
-    // =========================
-    // 📊 RESULTS
-    // =========================
-    std::cout << "\n===== Performance Comparison =====\n";
-    std::cout << "GPU Time: " << gpu_ms << " ms\n";
-    std::cout << "CPU Time: " << cpu_ms << " ms\n";
-    std::cout << "Speedup: " << cpu_ms / gpu_ms << "x\n";
+        auto cpu_end = std::chrono::high_resolution_clock::now();
 
-    cudaFree(d_input);
-    cudaFree(d_output);
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << "\n";
+        double cpu_ms = std::chrono::duration<double, std::milli>(cpu_end - cpu_start).count();
+
+        Image cpu_img = img;
+        cpu_img.data = cpu_output;
+
+        std::string cpu_out = cfg.output_prefix + "_cpu_" + cfg.filter + ".ppm";
+        savePPM(cpu_out, cpu_img);
+
+        // =========================
+        // 📊 RESULTS
+        // =========================
+        std::cout << "\n===== Benchmark =====\n";
+std::cout << "---------------------------------------\n";
+std::cout << "Filter      GPU(ms)   CPU(ms)   Speedup\n";
+std::cout << "---------------------------------------\n";
+
+printf("%-10s %-9.3f %-9.3f %.2fx\n",
+       cfg.filter.c_str(),
+       gpu_ms,
+       cpu_ms,
+       cpu_ms / gpu_ms);
+
+        std::cout << "\nOutputs:\n";
+        std::cout << "GPU: " << gpu_out << "\n";
+        std::cout << "CPU: " << cpu_out << "\n";
+
+        cudaFree(d_input);
+        cudaFree(d_output);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "ERROR: " << e.what() << "\n";
         return 1;
     }
 
