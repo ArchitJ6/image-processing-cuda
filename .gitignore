@@ -3,3 +3,5 @@ data/
 *.exe
 *.exp
 *.lib
+*.dll
+.vscode/
