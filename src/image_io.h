@@ -1,12 +1,13 @@
 #pragma once
-#include <vector>
+
+#include <opencv2/opencv.hpp>
 #include <string>
 
 struct Image {
     int width;
     int height;
-    std::vector<unsigned char> data; // RGB
+    cv::Mat mat;
 };
 
-Image loadPPM(const std::string& filename);
-void savePPM(const std::string& filename, const Image& img);
+Image loadImage(const std::string& filename);
+void saveImage(const std::string& filename, const Image& img);
