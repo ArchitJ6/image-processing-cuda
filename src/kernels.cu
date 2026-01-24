@@ -286,6 +286,157 @@ __global__ void sharpen_kernel(unsigned char *input, unsigned char *output, int 
     }
 }
 
+__global__ void sharpen_shared_kernel(
+    unsigned char* input,
+    unsigned char* output,
+    int w,
+    int h)
+{
+    __shared__ unsigned char tile[BLOCK + 2][BLOCK + 2];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int x = blockIdx.x * BLOCK + tx;
+    int y = blockIdx.y * BLOCK + ty;
+
+    // ==========================
+    // Initialize shared memory
+    // ==========================
+    tile[ty + 1][tx + 1] = 0;
+
+    if (tx == 0)
+        tile[ty + 1][0] = 0;
+
+    if (tx == BLOCK - 1)
+        tile[ty + 1][BLOCK + 1] = 0;
+
+    if (ty == 0)
+        tile[0][tx + 1] = 0;
+
+    if (ty == BLOCK - 1)
+        tile[BLOCK + 1][tx + 1] = 0;
+
+    if (tx == 0 && ty == 0)
+        tile[0][0] = 0;
+
+    if (tx == BLOCK - 1 && ty == 0)
+        tile[0][BLOCK + 1] = 0;
+
+    if (tx == 0 && ty == BLOCK - 1)
+        tile[BLOCK + 1][0] = 0;
+
+    if (tx == BLOCK - 1 && ty == BLOCK - 1)
+        tile[BLOCK + 1][BLOCK + 1] = 0;
+
+    // ==========================
+    // Load center pixel
+    // ==========================
+    if (x < w && y < h)
+    {
+        tile[ty + 1][tx + 1] =
+            input[(y * w + x) * 3];
+    }
+
+    // ==========================
+    // Load left/right halo
+    // ==========================
+    if (tx == 0 && x > 0)
+    {
+        tile[ty + 1][0] =
+            input[(y * w + (x - 1)) * 3];
+    }
+
+    if (tx == BLOCK - 1 && x < w - 1)
+    {
+        tile[ty + 1][BLOCK + 1] =
+            input[(y * w + (x + 1)) * 3];
+    }
+
+    // ==========================
+    // Load top/bottom halo
+    // ==========================
+    if (ty == 0 && y > 0)
+    {
+        tile[0][tx + 1] =
+            input[((y - 1) * w + x) * 3];
+    }
+
+    if (ty == BLOCK - 1 && y < h - 1)
+    {
+        tile[BLOCK + 1][tx + 1] =
+            input[((y + 1) * w + x) * 3];
+    }
+
+    // ==========================
+    // Load corner halos
+    // ==========================
+    if (tx == 0 && ty == 0 &&
+        x > 0 && y > 0)
+    {
+        tile[0][0] =
+            input[((y - 1) * w + (x - 1)) * 3];
+    }
+
+    if (tx == BLOCK - 1 && ty == 0 &&
+        x < w - 1 && y > 0)
+    {
+        tile[0][BLOCK + 1] =
+            input[((y - 1) * w + (x + 1)) * 3];
+    }
+
+    if (tx == 0 && ty == BLOCK - 1 &&
+        x > 0 && y < h - 1)
+    {
+        tile[BLOCK + 1][0] =
+            input[((y + 1) * w + (x - 1)) * 3];
+    }
+
+    if (tx == BLOCK - 1 &&
+        ty == BLOCK - 1 &&
+        x < w - 1 &&
+        y < h - 1)
+    {
+        tile[BLOCK + 1][BLOCK + 1] =
+            input[((y + 1) * w + (x + 1)) * 3];
+    }
+
+    // Copy borders
+    if (x < w && y < h)
+    {
+        int idx = (y * w + x) * 3;
+
+        output[idx]     = input[idx];
+        output[idx + 1] = input[idx + 1];
+        output[idx + 2] = input[idx + 2];
+    }
+
+    __syncthreads();
+
+    // ==========================
+    // Sharpen computation
+    // ==========================
+    if (x > 0 && x < w - 1 &&
+        y > 0 && y < h - 1)
+    {
+        int val =
+              5 * tile[ty + 1][tx + 1]
+            - tile[ty][tx + 1]
+            - tile[ty + 2][tx + 1]
+            - tile[ty + 1][tx]
+            - tile[ty + 1][tx + 2];
+
+        val = min(255, max(0, val));
+
+        int idx = (y * w + x) * 3;
+
+        output[idx] =
+        output[idx + 1] =
+        output[idx + 2] =
+            (unsigned char)val;
+    }
+}
+
 // ==========================
 // 🔹 CPU: SHARPEN
 // ==========================

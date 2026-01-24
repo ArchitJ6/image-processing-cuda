@@ -151,7 +151,7 @@ BenchmarkResult processImage(
         }
         else if (cfg.filter == "sharpen")
         {
-            sharpen_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+            sharpen_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
         }
         else
         {
