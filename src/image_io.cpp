@@ -1,7 +1,7 @@
 #include "image_io.h"
 #include <stdexcept>
 
-Image loadImage(const std::string& filename)
+Image loadImage(const std::string &filename)
 {
     cv::Mat img = cv::imread(filename);
 
@@ -16,7 +16,7 @@ Image loadImage(const std::string& filename)
     return out;
 }
 
-void saveImage(const std::string& filename, const Image& img)
+void saveImage(const std::string &filename, const Image &img)
 {
     cv::imwrite(filename, img.mat);
 }
