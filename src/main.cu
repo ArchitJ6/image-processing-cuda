@@ -312,7 +312,9 @@ BenchmarkResult processImage(
 
         if (!file_exists)
         {
-            csv << "image,filter,image_size,gpu_ms,cpu_ms,speedup\n";
+            csv << "image,filter,image_size,"
+                   "gpu_ms,cpu_ms,speedup,"
+                   "gpu_throughput,cpu_throughput\n";
         }
 
         csv
@@ -321,7 +323,10 @@ BenchmarkResult processImage(
             << img.width << "x" << img.height << ","
             << gpu_ms << ","
             << cpu_ms << ","
-            << speedup << "\n";
+            << speedup << ","
+            << gpu_throughput << ","
+            << cpu_throughput
+            << "\n";
 
         cudaFree(d_input);
         cudaFree(d_output);
