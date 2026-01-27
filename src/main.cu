@@ -19,6 +19,7 @@ struct Config
     std::string input = "data/input.png";
     std::string input_folder = "";
     std::string output_prefix = "output/output";
+    std::string video = "";
     int threshold = 0;
 };
 
@@ -55,6 +56,12 @@ Config parse_args(int argc, char **argv)
             i + 1 < argc)
         {
             cfg.input_folder = argv[++i];
+        }
+        else if (
+            strcmp(argv[i], "--video") == 0 &&
+            i + 1 < argc)
+        {
+            cfg.video = argv[++i];
         }
     }
 
@@ -346,6 +353,300 @@ BenchmarkResult processImage(
     }
 }
 
+void processVideo(
+    const std::string &video_path,
+    const Config &cfg)
+{
+    unsigned char *d_input = nullptr;
+    unsigned char *d_output = nullptr;
+
+    try
+    {
+        cv::VideoCapture cap(video_path);
+
+        if (!cap.isOpened())
+        {
+            throw std::runtime_error(
+                "Failed to open video");
+        }
+
+        int width =
+            (int)cap.get(
+                cv::CAP_PROP_FRAME_WIDTH);
+
+        int height =
+            (int)cap.get(
+                cv::CAP_PROP_FRAME_HEIGHT);
+
+        double fps =
+            cap.get(
+                cv::CAP_PROP_FPS);
+
+        int frame_count =
+            (int)cap.get(
+                cv::CAP_PROP_FRAME_COUNT);
+
+        std::cout
+            << "Video: "
+            << width
+            << "x"
+            << height
+            << "\n";
+
+        std::cout
+            << "FPS: "
+            << fps
+            << "\n";
+
+        std::cout
+            << "Frames: "
+            << frame_count
+            << "\n";
+
+        std::string output_video =
+            "output/" +
+            cfg.filter +
+            "_output.mp4";
+
+        cv::VideoWriter writer(
+            output_video,
+            cv::VideoWriter::fourcc(
+                'm', 'p', '4', 'v'),
+            fps,
+            cv::Size(width, height));
+
+        if (!writer.isOpened())
+        {
+            throw std::runtime_error(
+                "Failed to create output video");
+        }
+
+        cv::Mat frame;
+
+        if (!cap.read(frame))
+        {
+            throw std::runtime_error(
+                "Video contains no frames");
+        }
+
+        size_t size =
+            frame.total() *
+            frame.elemSize();
+
+        checkCuda(cudaMalloc(&d_input, size));
+        checkCuda(cudaMalloc(&d_output, size));
+
+        auto start =
+            std::chrono::high_resolution_clock::now();
+
+        int processed_frames = 0;
+
+        cv::Mat gpu_result(
+            height,
+            width,
+            CV_8UC3);
+
+        cudaEvent_t gpu_start, gpu_stop;
+
+        checkCuda(cudaEventCreate(&gpu_start));
+        checkCuda(cudaEventCreate(&gpu_stop));
+
+        double total_gpu_ms = 0;
+
+        do
+        {
+            if (frame.cols != width ||
+                frame.rows != height)
+            {
+                throw std::runtime_error(
+                    "Variable-size video not supported");
+            }
+
+            Image img;
+
+            img.width = frame.cols;
+            img.height = frame.rows;
+            img.mat = frame;
+
+            if (cfg.filter == "blur" ||
+                cfg.filter == "sobel" ||
+                cfg.filter == "sharpen")
+            {
+                cv::Mat gray;
+
+                cv::cvtColor(
+                    img.mat,
+                    gray,
+                    cv::COLOR_BGR2GRAY);
+
+                cv::cvtColor(
+                    gray,
+                    img.mat,
+                    cv::COLOR_GRAY2BGR);
+            }
+
+            checkCuda(
+                cudaMemcpy(
+                    d_input,
+                    img.mat.data,
+                    size,
+                    cudaMemcpyHostToDevice));
+
+            dim3 threads(16, 16);
+            dim3 blocks((img.width + 15) / 16, (img.height + 15) / 16);
+
+            // =========================
+            // 🚀 GPU EXECUTION
+            // =========================
+            cudaEventRecord(gpu_start);
+
+            if (cfg.filter == "grayscale")
+            {
+                grayscale_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+            }
+            else if (cfg.filter == "blur")
+            {
+                blur_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+            }
+            else if (cfg.filter == "sobel")
+            {
+                sobel_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height, cfg.threshold);
+            }
+            else if (cfg.filter == "sharpen")
+            {
+                sharpen_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+            }
+            else
+            {
+                throw std::runtime_error("Unknown filter");
+            }
+
+            checkCuda(cudaGetLastError());
+
+            checkCuda(cudaEventRecord(gpu_stop));
+            checkCuda(cudaEventSynchronize(gpu_stop));
+
+            float gpu_ms = 0;
+            checkCuda(
+                cudaEventElapsedTime(
+                    &gpu_ms,
+                    gpu_start,
+                    gpu_stop));
+
+            total_gpu_ms += gpu_ms;
+
+            checkCuda(
+                cudaMemcpy(
+                    gpu_result.data,
+                    d_output,
+                    size,
+                    cudaMemcpyDeviceToHost));
+
+            Image gpu_img;
+            gpu_img.width = img.width;
+            gpu_img.height = img.height;
+            gpu_img.mat = gpu_result;
+
+            writer.write(gpu_img.mat);
+
+            processed_frames++;
+
+            if (frame_count > 0)
+            {
+                int percent =
+                    (100 * processed_frames) /
+                    frame_count;
+
+                std::cout
+                    << "\rProgress: "
+                    << percent
+                    << "%"
+                    << std::flush;
+            }
+        } while (cap.read(frame));
+
+        cudaEventDestroy(gpu_start);
+        cudaEventDestroy(gpu_stop);
+
+        cap.release();
+        writer.release();
+
+        std::cout
+            << "\rProgress: 100%\n";
+
+        std::cout
+            << "Output Video: "
+            << output_video
+            << "\n";
+
+        cudaFree(d_input);
+        cudaFree(d_output);
+
+        auto end =
+            std::chrono::high_resolution_clock::now();
+
+        double sec =
+            std::chrono::duration<double>(
+                end - start)
+                .count();
+
+        double processed_fps =
+            processed_frames / sec;
+
+        double mpixels =
+            (double)(width * height * processed_frames) / 1e6;
+
+        double throughput =
+            mpixels / sec;
+
+        std::cout
+            << "\n===== Video Benchmark =====\n";
+
+        std::cout
+            << "Frames Processed: "
+            << processed_frames
+            << "\n";
+
+        std::cout
+            << "Average Kernel Time: "
+            << total_gpu_ms / processed_frames
+            << " ms/frame\n";
+
+        std::cout
+            << "Pipeline FPS: "
+            << processed_fps
+            << "\n";
+
+        std::cout
+            << "Throughput: "
+            << throughput
+            << " MPixels/s\n";
+
+        std::ofstream csv(
+            "output/video_benchmark.csv",
+            std::ios::app);
+
+        csv
+            << cfg.filter << ","
+            << width << "x" << height << ","
+            << frame_count << ","
+            << processed_fps << ","
+            << throughput
+            << "\n";
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "ERROR: " << e.what() << "\n";
+        if (d_input)
+            cudaFree(d_input);
+
+        if (d_output)
+            cudaFree(d_output);
+
+        throw;
+    }
+}
+
 // ==========================
 // 🚀 MAIN
 // ==========================
@@ -381,7 +682,15 @@ int main(int argc, char **argv)
             << "  app.exe --filter blur --input data/test.png\n"
             << "  app.exe --filter sobel --input data/test.png --threshold 100\n"
             << "  app.exe --filter sharpen --input data/test.png\n"
-            << "  app.exe --filter sobel --input_folder images\n\n";
+            << "  app.exe --filter sobel --input_folder images\n\n"
+
+            << "Video Mode:\n"
+            << "  app.exe --filter grayscale --video input.mp4\n"
+            << "  app.exe --filter blur --video input.mp4\n"
+            << "  app.exe --filter sobel --video input.mp4\n"
+            << "  app.exe --filter sharpen --video input.mp4\n\n"
+
+            << "Note: Threshold only applies to Sobel filter.\n\n";
 
         return 0;
     }
@@ -389,12 +698,27 @@ int main(int argc, char **argv)
     auto app_start =
         std::chrono::high_resolution_clock::now();
 
-    std::cout << "Program started\n";
     std::cout.flush();
 
     try
     {
         Config cfg = parse_args(argc, argv);
+
+        const std::vector<std::string> valid_filters =
+            {
+                "grayscale",
+                "blur",
+                "sobel",
+                "sharpen"};
+
+        if (std::find(
+                valid_filters.begin(),
+                valid_filters.end(),
+                cfg.filter) == valid_filters.end())
+        {
+            throw std::runtime_error(
+                "Unknown filter: " + cfg.filter);
+        }
 
         std::filesystem::create_directories("output");
 
@@ -544,9 +868,18 @@ int main(int argc, char **argv)
         }
         else
         {
-            processImage(
-                cfg.input,
-                cfg);
+            if (!cfg.video.empty())
+            {
+                processVideo(
+                    cfg.video,
+                    cfg);
+            }
+            else
+            {
+                processImage(
+                    cfg.input,
+                    cfg);
+            }
         }
     }
     catch (const std::exception &e)
