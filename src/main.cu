@@ -453,6 +453,11 @@ void processVideo(
 
         double total_gpu_ms = 0;
 
+        cudaStream_t stream;
+
+        checkCuda(
+            cudaStreamCreate(&stream));
+
         do
         {
             if (frame.cols != width ||
@@ -485,12 +490,12 @@ void processVideo(
                     cv::COLOR_GRAY2BGR);
             }
 
-            checkCuda(
-                cudaMemcpy(
-                    d_input,
-                    img.mat.data,
-                    size,
-                    cudaMemcpyHostToDevice));
+            cudaMemcpyAsync(
+                d_input,
+                img.mat.data,
+                size,
+                cudaMemcpyHostToDevice,
+                stream);
 
             dim3 threads(16, 16);
             dim3 blocks((img.width + 15) / 16, (img.height + 15) / 16);
@@ -498,23 +503,31 @@ void processVideo(
             // =========================
             // 🚀 GPU EXECUTION
             // =========================
-            cudaEventRecord(gpu_start);
+            cudaEventRecord(gpu_start, stream);
 
             if (cfg.filter == "grayscale")
             {
-                grayscale_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+                grayscale_kernel<<<
+                    blocks,
+                    threads,
+                    0,
+                    stream>>>(
+                    d_input,
+                    d_output,
+                    img.width,
+                    img.height);
             }
             else if (cfg.filter == "blur")
             {
-                blur_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+                blur_shared_kernel<<<blocks, threads, 0, stream>>>(d_input, d_output, img.width, img.height);
             }
             else if (cfg.filter == "sobel")
             {
-                sobel_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height, cfg.threshold);
+                sobel_shared_kernel<<<blocks, threads, 0, stream>>>(d_input, d_output, img.width, img.height, cfg.threshold);
             }
             else if (cfg.filter == "sharpen")
             {
-                sharpen_shared_kernel<<<blocks, threads>>>(d_input, d_output, img.width, img.height);
+                sharpen_shared_kernel<<<blocks, threads, 0, stream>>>(d_input, d_output, img.width, img.height);
             }
             else
             {
@@ -523,8 +536,8 @@ void processVideo(
 
             checkCuda(cudaGetLastError());
 
-            checkCuda(cudaEventRecord(gpu_stop));
-            checkCuda(cudaEventSynchronize(gpu_stop));
+            checkCuda(cudaEventRecord(gpu_stop, stream));
+            checkCuda(cudaStreamSynchronize(stream));
 
             float gpu_ms = 0;
             checkCuda(
@@ -535,17 +548,21 @@ void processVideo(
 
             total_gpu_ms += gpu_ms;
 
-            checkCuda(
-                cudaMemcpy(
-                    gpu_result.data,
-                    d_output,
-                    size,
-                    cudaMemcpyDeviceToHost));
+            cudaMemcpyAsync(
+                gpu_result.data,
+                d_output,
+                size,
+                cudaMemcpyDeviceToHost,
+                stream);
 
             Image gpu_img;
             gpu_img.width = img.width;
             gpu_img.height = img.height;
             gpu_img.mat = gpu_result;
+
+            checkCuda(
+                cudaStreamSynchronize(
+                    stream));
 
             writer.write(gpu_img.mat);
 
@@ -564,6 +581,8 @@ void processVideo(
                     << std::flush;
             }
         } while (cap.read(frame));
+
+        checkCuda(cudaStreamDestroy(stream));
 
         cudaEventDestroy(gpu_start);
         cudaEventDestroy(gpu_stop);
